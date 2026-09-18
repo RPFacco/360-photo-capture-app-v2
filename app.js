@@ -1,18 +1,18 @@
 "use strict";
 
 const LEVEL_TARGETS = [60, 30, 0, -30, -60];
-const SHOTS_PER_LEVEL = 8;
+const SHOTS_PER_LEVEL = 12;
 const TOTAL_SHOTS = LEVEL_TARGETS.length * SHOTS_PER_LEVEL;
 
 const TOLERANCE = 5;
 const RANGE = 25;
 const SMOOTHING = 0.18;
 
-// Rotation between shots. The tolerance is looser than TOLERANCE because 45 degree
-// sectors want overlap, and a few degrees of slop costs nothing in the final set.
-const YAW_STEP = 45;
-const YAW_TOLERANCE = 8;
-const YAW_RANGE = 45;   // the gauge spans one full step: just-shot at the end, target at the centre
+// Rotation between shots. 6 degrees of slop on a 30 degree step still leaves the
+// neighbours overlapping by about a third on a typical phone lens.
+const YAW_STEP = 360 / SHOTS_PER_LEVEL;
+const YAW_TOLERANCE = 6;
+const YAW_RANGE = YAW_STEP; // the gauge spans one full step: just-shot at the end, target at the centre
 const ROTATION_SIGN = 1; // flip to -1 if "rotate right" drives the bubble away from the centre
 const DEG = Math.PI / 180;
 
@@ -39,7 +39,8 @@ let running = false;
 
 let rawYaw = null;
 let displayYaw = null;
-let levelStartYaw = null;   // yaw reference, re-zeroed on the first shot of every level
+let levelStartYaw = null;   // heading where shot 0 of the current level sits
+let refShot = 0;            // the shot that re-zeroes it: 0, or the first one after a resume
 let lastSpinShown = null;
 let lastSpinAligned = null;
 
@@ -71,7 +72,7 @@ let shotW = 0, shotH = 0;
 
 const $ = (id) => document.getElementById(id);
 const intro = $("intro"), capture = $("capture");
-const startBtn = $("start-btn"), errorEl = $("error");
+const startBtn = $("start-btn"), restartBtn = $("restart-btn"), errorEl = $("error");
 const video = $("video");
 const progressFill = $("progress-fill");
 const levelLabel = $("level-label"), shotCounter = $("shot-label");
@@ -82,18 +83,103 @@ const prompt = $("prompt");
 const captureBtn = $("capture-btn"), exportBtn = $("export-btn");
 const flash = $("flash"), perf = $("perf");
 
-startBtn.addEventListener("click", async () => {
-  errorEl.classList.add("hidden");
-  startBtn.disabled = true;
+// Photos go to IndexedDB as they are taken instead of piling up in RAM, so a run is
+// bounded by storage rather than memory, and a tab Safari kills mid-run can pick up
+// where it stopped. Without IndexedDB (some private modes), or when a write fails,
+// the photo simply stays in RAM as before.
+const STORE = "photos";
+let db = null;
+let storedCount = 0;      // photos an earlier page left behind, from shot 1 with no gaps
+let restartArmed = false;
 
+function openDB() {
+  return new Promise((resolve) => {
+    let req;
+    try { req = indexedDB.open("guided-360", 1); } catch (_) { return resolve(null); }
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = req.onblocked = () => resolve(null);
+  });
+}
+
+// Resolves when the transaction commits, so a write is only trusted once it is durable.
+function idb(mode, op) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, mode);
+    const req = op(tx.objectStore(STORE));
+    tx.oncomplete = () => resolve(req.result);
+    tx.onerror = tx.onabort = () => reject(tx.error);
+  });
+}
+
+const photoKey = (p) => p.level * SHOTS_PER_LEVEL + p.shot;
+
+function savePhoto(entry) {
+  if (!db) return;
+  idb("readwrite", (s) => s.put(entry.blob, photoKey(entry)))
+    .then(() => { entry.blob = null; }) // IndexedDB holds it now: let the RAM copy go
+    .catch(() => {});                   // stays in RAM, and export reads it from the entry
+}
+
+function restoreSession(n) {
+  for (let i = 0; i < n; i++) {
+    photos.push({ level: Math.floor(i / SHOTS_PER_LEVEL), shot: i % SHOTS_PER_LEVEL, blob: null });
+  }
+  currentLevel = Math.floor(n / SHOTS_PER_LEVEL);
+  currentShot = n % SHOTS_PER_LEVEL;
+  // The heading reference died with the old page - iOS alpha has no fixed zero across
+  // page loads - so the first shot after a resume becomes the new reference.
+  refShot = currentShot;
+}
+
+const dbReady = openDB().then(async (handle) => {
+  db = handle;
+  if (!db) return;
+  const keys = await idb("readonly", (s) => s.getAllKeys()).catch(() => []);
+  const max = Math.min(keys.length, TOTAL_SHOTS);
+  while (storedCount < max && keys[storedCount] === storedCount) storedCount++;
+  if (storedCount) {
+    startBtn.textContent = `Continue (${storedCount} of ${TOTAL_SHOTS})`;
+    restartBtn.classList.remove("hidden");
+  }
+});
+
+startBtn.addEventListener("click", () => begin(true));
+
+// Two taps rather than confirm(): a modal between the tap and requestPermission could
+// cost iOS the user gesture it insists on.
+restartBtn.addEventListener("click", () => {
+  if (!restartArmed) {
+    restartArmed = true;
+    restartBtn.textContent = `Tap again to discard ${storedCount} photos`;
+    return;
+  }
+  begin(false);
+});
+
+async function begin(resume) {
+  errorEl.classList.add("hidden");
+  startBtn.disabled = restartBtn.disabled = true;
+
+  // Before anything else is awaited: iOS only grants orientation from inside the tap.
   gyroActive = await requestGyro();
+
+  await dbReady;
+  photos.length = 0;
+  currentLevel = currentShot = refShot = 0;
+  if (resume && storedCount) {
+    restoreSession(storedCount);
+  } else if (db) {
+    await idb("readwrite", (s) => s.clear()).catch(() => {});
+    storedCount = 0;
+  }
 
   try {
     await startCamera();
   } catch (err) {
     errorEl.textContent = "Camera error: " + err.message + " (needs an HTTPS page)";
     errorEl.classList.remove("hidden");
-    startBtn.disabled = false;
+    startBtn.disabled = restartBtn.disabled = false;
     return;
   }
 
@@ -112,7 +198,7 @@ startBtn.addEventListener("click", async () => {
   updateHUD();
   updatePerf();
   requestAnimationFrame(renderLoop);
-});
+}
 
 async function requestGyro() {
   if (typeof DeviceOrientationEvent === "undefined") return false;
@@ -305,7 +391,7 @@ function renderLoop(now) {
     displayYaw = (displayYaw === null)
         ? rawYaw
         : normDeg(displayYaw + angleDiff(rawYaw, displayYaw) * SMOOTHING);
-    if (levelStartYaw === null) levelStartYaw = displayYaw;
+    if (levelStartYaw === null) levelStartYaw = normDeg(displayYaw - ROTATION_SIGN * YAW_STEP * currentShot);
     updateSpin();
   }
   drawDome();
@@ -366,15 +452,16 @@ function refreshReady() {
 
 // Measured from the start of the LEVEL, not from the previous shot: overshooting one
 // step then leaves the next target still on the ideal grid, instead of dragging the
-// whole 8-shot pattern along with the error.
+// level's whole pattern along with the error.
 function spinTarget() {
   return levelStartYaw === null ? null : levelStartYaw + ROTATION_SIGN * YAW_STEP * currentShot;
 }
 
 function updateSpin() {
   const target = spinTarget();
-  if (target === null || displayYaw === null || currentShot === 0) {
-    // First shot of a level is the reference - there is no rotation to satisfy yet.
+  if (target === null || displayYaw === null || currentShot === refShot) {
+    // The reference shot (first of the level, or first after a resume) has nothing
+    // to rotate from yet.
     if (!spinAligned) { spinAligned = true; refreshReady(); }
     lastSpinAligned = null;
     return;
@@ -519,17 +606,19 @@ function updateHUD() {
 
   const t = LEVEL_TARGETS[currentLevel];
   const tiltText = `${t > 0 ? "+" : ""}${t}°`;
-  levelLabel.textContent = `Level ${currentLevel + 1} of 5 (${tiltText})`;
-  shotCounter.textContent = `Shot ${currentShot + 1} of 8`;
+  levelLabel.textContent = `Level ${currentLevel + 1} of ${LEVEL_TARGETS.length} (${tiltText})`;
+  shotCounter.textContent = `Shot ${currentShot + 1} of ${SHOTS_PER_LEVEL}`;
   prompt.textContent = currentShot === 0
       ? (gyroActive ? `Tilt the phone to ${tiltText}` : `Aim ~${tiltText} (no sensor)`)
-      : (gyroActive ? "Rotate right until the bar centres" : "Rotate ~45° right (no sensor)");
+      : currentShot === refShot
+      ? `Rotate ~${YAW_STEP}° past your last shot`
+      : (gyroActive ? "Rotate right until the bar centres" : `Rotate ~${YAW_STEP}° right (no sensor)`);
 
-  spin.classList.toggle("hidden", !gyroActive || currentShot === 0);
+  spin.classList.toggle("hidden", !gyroActive || currentShot === refShot);
 }
 
 // Read the JPEG frame header rather than decoding: createImageBitmap on an 8MP still,
-// forty times over, is the allocation pattern that kills a mobile tab.
+// once per shot, is the allocation pattern that kills a mobile tab.
 async function jpegSize(blob) {
   try {
     const b = new Uint8Array(await blob.slice(0, 65536).arrayBuffer());
@@ -628,34 +717,111 @@ captureBtn.addEventListener("click", async () => {
   shotLabel = (shotW ? shotW + "×" + shotH + " " : "") + "(" + fmtSize(blob.size) + ")";
   updatePerf();
 
-  photos.push({ level: currentLevel, shot: currentShot, blob });
+  const entry = { level: currentLevel, shot: currentShot, blob };
+  photos.push(entry);
+  savePhoto(entry);
 
-  // The first shot of a level IS the rotation reference, so zero it here: drift only
-  // ever accumulates within one level (~1 min) instead of across the whole run.
-  if (currentShot === 0 && rawYaw !== null) levelStartYaw = rawYaw;
+  // The reference shot re-zeroes the heading, kept as where shot 0 of the level sits:
+  // drift then only accumulates within one level (~1 min) instead of the whole run.
+  if (currentShot === refShot && rawYaw !== null) {
+    levelStartYaw = normDeg(rawYaw - ROTATION_SIGN * YAW_STEP * currentShot);
+  }
 
   currentShot++;
   if (currentShot >= SHOTS_PER_LEVEL) {
     currentShot = 0;
     currentLevel++;
+    refShot = 0;
   }
   updateHUD();
 });
 
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+// A stored (uncompressed) zip, by hand. Stored, not deflated: JPEGs do not compress,
+// and deflating 40 of them in one pass was enough on its own to push mobile Safari
+// over its memory limit. Stored also means each entry is just a header in front of
+// the photo, so the photo Blobs go into new Blob() as parts and need not be copied
+// into one buffer the way JSZip did. The only read is the CRC, one photo at a time.
+async function buildZip(files) {
+  const enc = new TextEncoder();
+  const now = new Date();
+  const time = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+  const date = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  const parts = [], central = [];
+  let offset = 0;
+
+  for (const f of files) {
+    const name = enc.encode(f.name);
+    const crc = crc32(new Uint8Array(await f.blob.arrayBuffer()));
+    const size = f.blob.size;
+
+    const local = new DataView(new ArrayBuffer(30));
+    local.setUint32(0, 0x04034b50, true);
+    local.setUint16(4, 20, true);
+    local.setUint16(10, time, true);
+    local.setUint16(12, date, true);
+    local.setUint32(14, crc, true);
+    local.setUint32(18, size, true);
+    local.setUint32(22, size, true);
+    local.setUint16(26, name.length, true);
+    parts.push(local, name, f.blob);
+
+    const dir = new DataView(new ArrayBuffer(46));
+    dir.setUint32(0, 0x02014b50, true);
+    dir.setUint16(4, 20, true);
+    dir.setUint16(6, 20, true);
+    dir.setUint16(12, time, true);
+    dir.setUint16(14, date, true);
+    dir.setUint32(16, crc, true);
+    dir.setUint32(20, size, true);
+    dir.setUint32(24, size, true);
+    dir.setUint16(28, name.length, true);
+    dir.setUint32(42, offset, true);
+    central.push(dir, name);
+
+    offset += 30 + name.length + size;
+  }
+
+  const dirSize = central.reduce((n, p) => n + p.byteLength, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true);
+  end.setUint16(8, files.length, true);
+  end.setUint16(10, files.length, true);
+  end.setUint32(12, dirSize, true);
+  end.setUint32(16, offset, true);
+
+  return new Blob([...parts, ...central, end], { type: "application/zip" });
+}
+
 exportBtn.addEventListener("click", async () => {
+  const label = exportBtn.textContent;
   exportBtn.disabled = true;
   exportBtn.textContent = "Packing…";
   try {
-    const zip = new JSZip();
-    const folder = zip.folder("360_photos");
+    const files = [];
     for (const p of photos) {
+      const blob = p.blob || await idb("readonly", (s) => s.get(photoKey(p)));
+      if (!blob) throw new Error(`shot ${photoKey(p) + 1} is missing from storage`);
       const l = String(p.level + 1).padStart(2, "0");
       const s = String(p.shot + 1).padStart(2, "0");
-      folder.file(`level_${l}_shot_${s}.jpg`, p.blob);
+      files.push({ name: `360_photos/level_${l}_shot_${s}.jpg`, blob });
     }
-    // STORE, not DEFLATE: JPEGs do not compress, and deflating 40 of them in one
-    // pass is enough on its own to push mobile Safari over its memory limit.
-    const content = await zip.generateAsync({ type: "blob", compression: "STORE" });
+    const content = await buildZip(files);
     const url = URL.createObjectURL(content);
     const a = document.createElement("a");
     a.href = url;
@@ -666,6 +832,6 @@ exportBtn.addEventListener("click", async () => {
   } catch (err) {
     alert("Failed to build ZIP: " + err.message);
     exportBtn.disabled = false;
-    exportBtn.textContent = "Download all 40 photos (.zip)";
+    exportBtn.textContent = label;
   }
 });

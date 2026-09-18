@@ -4,7 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Guided 360 Capture</title>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -12,8 +11,9 @@
 <section id="intro" class="screen active">
   <div class="intro-box">
     <h1>360 Capture</h1>
-    <p>40 photos: 5 tilt levels, 8 shots each, rotating ~45° per shot. Hold the phone upright (portrait).</p>
+    <p>60 photos: 5 tilt levels, 12 shots each, rotating ~30° per shot. Hold the phone upright (portrait).</p>
     <button id="start-btn" class="btn">Start capture</button>
+    <button id="restart-btn" class="btn secondary hidden">Start over</button>
     <p id="error" class="error hidden"></p>
   </div>
 </section>
@@ -25,7 +25,7 @@
     <div class="progress"><div id="progress-fill"></div></div>
     <div class="status">
       <span id="level-label">Level 1 of 5</span>
-      <span id="shot-label">Shot 1 of 8</span>
+      <span id="shot-label">Shot 1 of 12</span>
     </div>
     <div id="perf" class="perf"></div>
   </header>
@@ -46,11 +46,11 @@
         <div class="spin-center"></div>
         <div id="spin-bubble" class="spin-bubble"></div>
       </div>
-      <div id="spin-deg" class="angle">45°</div>
+      <div id="spin-deg" class="angle"></div>
     </div>
     <p id="prompt" class="prompt">Tilt to target</p>
     <button id="capture-btn" class="capture-btn" aria-label="Take photo"></button>
-    <button id="export-btn" class="btn hidden">Download all 40 photos (.zip)</button>
+    <button id="export-btn" class="btn hidden">Download all 60 photos (.zip)</button>
   </footer>
 
   <div id="flash" class="flash"></div>

@@ -44,6 +44,13 @@ html, body {
   cursor: pointer;
 }
 .btn:active { transform: scale(0.98); }
+.btn.secondary {
+  display: block;
+  margin: 0.75rem auto 0;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 500;
+}
 
 .error {
   margin-top: 1rem;
