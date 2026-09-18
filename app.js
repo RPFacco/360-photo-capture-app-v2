@@ -8,6 +8,16 @@ const TOLERANCE = 5;
 const RANGE = 25;
 const SMOOTHING = 0.18;
 
+// Rotation between shots. The tolerance is looser than TOLERANCE because 45 degree
+// sectors want overlap, and a few degrees of slop costs nothing in the final set.
+const YAW_STEP = 45;
+const YAW_TOLERANCE = 8;
+const YAW_RANGE = 45;   // the gauge spans one full step: just-shot at the end, target at the centre
+const ROTATION_SIGN = 1; // flip to -1 if "rotate right" drives the bubble away from the centre
+const DEG = Math.PI / 180;
+
+const DOME_PX = 112;    // keep in sync with .dome in style.css
+
 const JPEG_QUALITY = 0.92;
 const SHOT_AR = 3 / 4;  // width/height, in portrait
 const LONG_EDGE = 1920; // canvas fallback only: cap the grab at 1440x1920
@@ -26,6 +36,17 @@ let displayPitch = null;
 let lastAngleShown = null;
 let lastAligned = null;
 let running = false;
+
+let rawYaw = null;
+let displayYaw = null;
+let levelStartYaw = null;   // yaw reference, re-zeroed on the first shot of every level
+let lastSpinShown = null;
+let lastSpinAligned = null;
+
+// The shutter ring now answers to both axes, so each one keeps its own verdict.
+let tiltAligned = false;
+let spinAligned = false;
+let lastReady = null;
 
 let gyroActive = false;
 let gotOrientation = false;
@@ -55,6 +76,8 @@ const video = $("video");
 const progressFill = $("progress-fill");
 const levelLabel = $("level-label"), shotCounter = $("shot-label");
 const tilt = $("tilt"), bubble = $("tilt-bubble"), angleEl = $("angle");
+const dome = $("dome");
+const spin = $("spin"), spinBubble = $("spin-bubble"), spinDeg = $("spin-deg");
 const prompt = $("prompt");
 const captureBtn = $("capture-btn"), exportBtn = $("export-btn");
 const flash = $("flash"), perf = $("perf");
@@ -85,6 +108,7 @@ startBtn.addEventListener("click", async () => {
   capture.classList.replace("hidden", "active");
 
   running = true;
+  initDome();
   updateHUD();
   updatePerf();
   requestAnimationFrame(renderLoop);
@@ -218,11 +242,43 @@ async function recoverPreview() {
   try { await startCamera(); } catch (_) {}
 }
 
+function normDeg(d) {
+  return ((d % 360) + 360) % 360;
+}
+
+// Shortest signed distance from b to a, in [-180, 180). Plain subtraction turns the
+// 359 -> 1 wrap into a 358 degree jump, which shows up as the bubble flying across
+// the track and as a 359 degree lerp in the smoothing.
+function angleDiff(a, b) {
+  return ((((a - b) % 360) + 540) % 360) - 180;
+}
+
+// Never read e.alpha directly. deviceorientation is Euler ZXY, and alpha/gamma go
+// degenerate at beta = +-90 - which, given rawPitch = e.beta - 90 below, is exactly
+// LEVEL_TARGETS' 0 degree level. Raw alpha would hand back a yaw that jumps around
+// on the middle level of the run. Rebuilding R = Rz(a)Rx(b)Ry(g) and taking the
+// azimuth of the rear camera axis (the device -z) steps around that: the noise in
+// alpha and gamma largely cancels on recomposition, and across +60..-60 the vector's
+// horizontal component never drops below cos 60, so the azimuth stays well behaved.
+function cameraHeading(alpha, beta, gamma) {
+  const cA = Math.cos(alpha * DEG), sA = Math.sin(alpha * DEG);
+  const sB = Math.sin(beta * DEG); // so o seno entra em m13/m23
+  const cG = Math.cos(gamma * DEG), sG = Math.sin(gamma * DEG);
+  // third column of R: the device +z axis in world coords (X east, Y north, Z up)
+  const m13 = cA * sG + sA * sB * cG;
+  const m23 = sA * sG - cA * sB * cG;
+  return normDeg(Math.atan2(-m13, -m23) / DEG);
+}
+
 function disableTilt() {
   gyroActive = false;
   window.removeEventListener("deviceorientation", handleOrientation);
   tilt.classList.add("hidden");
-  captureBtn.classList.add("ready");
+  spin.classList.add("hidden");
+  // No sensor, no verdict to give: the shutter stays lit, and the dome carries on as a
+  // plain progress map minus the live cursor.
+  tiltAligned = spinAligned = true;
+  refreshReady();
   updateHUD();
 }
 
@@ -231,6 +287,7 @@ function handleOrientation(e) {
   gotOrientation = true;
   // Flip to (90 - e.beta) if pitch is inverted on your device.
   rawPitch = e.beta - 90;
+  if (e.alpha != null && e.gamma != null) rawYaw = cameraHeading(e.alpha, e.beta, e.gamma);
 }
 
 function renderLoop(now) {
@@ -241,6 +298,17 @@ function renderLoop(now) {
         : displayPitch + (rawPitch - displayPitch) * SMOOTHING;
     updateTilt(displayPitch);
   }
+
+  if (gyroActive && rawYaw !== null) {
+    // Same smoothing as the pitch, but stepped through angleDiff so it takes the
+    // short way around instead of unwinding the whole circle at the wrap.
+    displayYaw = (displayYaw === null)
+        ? rawYaw
+        : normDeg(displayYaw + angleDiff(rawYaw, displayYaw) * SMOOTHING);
+    if (levelStartYaw === null) levelStartYaw = displayYaw;
+    updateSpin();
+  }
+  drawDome();
 
   uiFrames++;
   if (!fpsAt) fpsAt = now;
@@ -280,14 +348,163 @@ function updateTilt(pitch) {
   const aligned = Math.abs(diff) <= TOLERANCE;
   if (aligned !== lastAligned) {
     tilt.classList.toggle("aligned", aligned);
-    captureBtn.classList.toggle("ready", aligned);
+    tiltAligned = aligned;
+    refreshReady();
     lastAligned = aligned;
   }
+}
+
+// Both axes have to agree before the shutter goes green. Advisory only - the button
+// never blocks, same as before, because a drifting sensor must not be able to stop
+// the run.
+function refreshReady() {
+  const ready = tiltAligned && spinAligned;
+  if (ready === lastReady) return;
+  captureBtn.classList.toggle("ready", ready);
+  lastReady = ready;
+}
+
+// Measured from the start of the LEVEL, not from the previous shot: overshooting one
+// step then leaves the next target still on the ideal grid, instead of dragging the
+// whole 8-shot pattern along with the error.
+function spinTarget() {
+  return levelStartYaw === null ? null : levelStartYaw + ROTATION_SIGN * YAW_STEP * currentShot;
+}
+
+function updateSpin() {
+  const target = spinTarget();
+  if (target === null || displayYaw === null || currentShot === 0) {
+    // First shot of a level is the reference - there is no rotation to satisfy yet.
+    if (!spinAligned) { spinAligned = true; refreshReady(); }
+    lastSpinAligned = null;
+    return;
+  }
+
+  const diff = angleDiff(displayYaw, target);
+
+  const half = 97;
+  const clamped = Math.max(-YAW_RANGE, Math.min(YAW_RANGE, diff));
+  const offset = (clamped / YAW_RANGE) * half;
+  spinBubble.style.transform = `translate(calc(-50% + ${offset.toFixed(1)}px), -50%)`;
+
+  const deg = Math.round(-diff * ROTATION_SIGN); // degrees still to go, counting down to 0
+  if (deg !== lastSpinShown) {
+    spinDeg.textContent = (deg > 0 ? "+" : "") + deg + "\u00b0";
+    lastSpinShown = deg;
+  }
+
+  const aligned = Math.abs(diff) <= YAW_TOLERANCE;
+  if (aligned !== lastSpinAligned) {
+    spin.classList.toggle("aligned", aligned);
+    spinAligned = aligned;
+    refreshReady();
+    lastSpinAligned = aligned;
+  }
+}
+
+// Coverage dome: LEVEL_TARGETS.length rings x SHOTS_PER_LEVEL sectors, seen from above.
+// The 40 cells only change when a photo lands, so they live on their own canvas and the
+// per-frame work is one blit plus the cursor - drawing 40 arcs at 60fps would be waste
+// in an app that puts its own frame rate on screen.
+const domeBase = document.createElement("canvas");
+const domeBaseCtx = domeBase.getContext("2d");
+const domeCtx = dome.getContext("2d");
+let domeR = 0, domeMid = 0, domeScale = 1;
+let domeDirty = true, domeCursor = "";
+const domeInk = { accent: "#4c8dff", ok: "#34d17a" };
+
+function initDome() {
+  domeScale = Math.min(window.devicePixelRatio || 1, 3);
+  const px = Math.round(DOME_PX * domeScale);
+  dome.width = domeBase.width = px;
+  dome.height = domeBase.height = px;
+  domeMid = px / 2;
+  domeR = domeMid - 2 * domeScale; // room for the outer ring stroke
+
+  // Single-source the palette: these are the same tokens style.css paints with.
+  const cs = getComputedStyle(document.documentElement);
+  domeInk.accent = cs.getPropertyValue("--accent").trim() || domeInk.accent;
+  domeInk.ok = cs.getPropertyValue("--ok").trim() || domeInk.ok;
+
+  drawDomeBase();
+}
+
+function cellPath(ctx, level, sector) {
+  const step = 360 / SHOTS_PER_LEVEL;
+  const r0 = domeR * level / LEVEL_TARGETS.length;
+  const r1 = domeR * (level + 1) / LEVEL_TARGETS.length;
+  const a0 = (sector * step - 90 - step / 2) * DEG; // sector 0 centred at the top
+  const a1 = a0 + step * DEG;
+  ctx.beginPath();
+  ctx.arc(domeMid, domeMid, r1, a0, a1);
+  ctx.arc(domeMid, domeMid, r0, a1, a0, true);
+  ctx.closePath();
+}
+
+function drawDomeBase() {
+  if (!domeR) return;
+  const ctx = domeBaseCtx;
+  ctx.clearRect(0, 0, domeBase.width, domeBase.height);
+
+  // Capture is sequential, so the filled cells are always the first `done` in order.
+  const done = currentLevel * SHOTS_PER_LEVEL + currentShot;
+  for (let level = 0; level < LEVEL_TARGETS.length; level++) {
+    for (let sector = 0; sector < SHOTS_PER_LEVEL; sector++) {
+      const idx = level * SHOTS_PER_LEVEL + sector;
+      const isTarget = idx === done;
+      cellPath(ctx, level, sector);
+      if (idx < done) {
+        ctx.globalAlpha = 0.8;
+        ctx.fillStyle = domeInk.accent;
+      } else {
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = "rgba(255,255,255,0.07)";
+      }
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = (isTarget ? 2 : 1) * domeScale;
+      ctx.strokeStyle = isTarget ? domeInk.ok : "rgba(255,255,255,0.22)";
+      ctx.stroke();
+    }
+  }
+  domeDirty = true;
+}
+
+function drawDome() {
+  if (!domeR) return;
+
+  // (75 - pitch) / 150 lands each LEVEL_TARGETS entry on the CENTRE of its ring
+  // (+60 -> 0.1, 0 -> 0.5, -60 -> 0.9) rather than on the seam between two rings.
+  const live = gyroActive && displayPitch !== null && displayYaw !== null && levelStartYaw !== null;
+  let x = 0, y = 0, key = "";
+  if (live) {
+    const r = Math.max(0, Math.min(1, (75 - displayPitch) / 150)) * domeR;
+    const a = (ROTATION_SIGN * angleDiff(displayYaw, levelStartYaw) - 90) * DEG;
+    x = domeMid + r * Math.cos(a);
+    y = domeMid + r * Math.sin(a);
+    key = Math.round(x) + ":" + Math.round(y);
+  }
+  if (!domeDirty && key === domeCursor) return;
+  domeDirty = false;
+  domeCursor = key;
+
+  domeCtx.clearRect(0, 0, dome.width, dome.height);
+  domeCtx.drawImage(domeBase, 0, 0);
+  if (!live) return;
+
+  domeCtx.beginPath();
+  domeCtx.arc(x, y, 4 * domeScale, 0, Math.PI * 2);
+  domeCtx.fillStyle = "#fff";
+  domeCtx.fill();
+  domeCtx.lineWidth = 2 * domeScale;
+  domeCtx.strokeStyle = "rgba(0,0,0,0.55)";
+  domeCtx.stroke();
 }
 
 function updateHUD() {
   const done = currentLevel * SHOTS_PER_LEVEL + currentShot;
   progressFill.style.width = (done / TOTAL_SHOTS) * 100 + "%";
+  drawDomeBase();
 
   if (done >= TOTAL_SHOTS) {
     levelLabel.textContent = "Done";
@@ -296,6 +513,7 @@ function updateHUD() {
     captureBtn.classList.add("hidden");
     exportBtn.classList.remove("hidden");
     tilt.classList.add("hidden");
+    spin.classList.add("hidden");
     return;
   }
 
@@ -305,7 +523,9 @@ function updateHUD() {
   shotCounter.textContent = `Shot ${currentShot + 1} of 8`;
   prompt.textContent = currentShot === 0
       ? (gyroActive ? `Tilt the phone to ${tiltText}` : `Aim ~${tiltText} (no sensor)`)
-      : "Rotate ~45° right" + (gyroActive ? " and align" : "");
+      : (gyroActive ? "Rotate right until the bar centres" : "Rotate ~45° right (no sensor)");
+
+  spin.classList.toggle("hidden", !gyroActive || currentShot === 0);
 }
 
 // Read the JPEG frame header rather than decoding: createImageBitmap on an 8MP still,
@@ -409,6 +629,10 @@ captureBtn.addEventListener("click", async () => {
   updatePerf();
 
   photos.push({ level: currentLevel, shot: currentShot, blob });
+
+  // The first shot of a level IS the rotation reference, so zero it here: drift only
+  // ever accumulates within one level (~1 min) instead of across the whole run.
+  if (currentShot === 0 && rawYaw !== null) levelStartYaw = rawYaw;
 
   currentShot++;
   if (currentShot >= SHOTS_PER_LEVEL) {

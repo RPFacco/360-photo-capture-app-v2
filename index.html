@@ -30,6 +30,8 @@
     <div id="perf" class="perf"></div>
   </header>
 
+  <canvas id="dome" class="dome" aria-hidden="true"></canvas>
+
   <div id="tilt" class="tilt">
     <div class="tilt-track">
       <div class="tilt-center"></div>
@@ -39,6 +41,13 @@
   </div>
 
   <footer class="hud-bottom">
+    <div id="spin" class="spin hidden">
+      <div class="spin-track">
+        <div class="spin-center"></div>
+        <div id="spin-bubble" class="spin-bubble"></div>
+      </div>
+      <div id="spin-deg" class="angle">45°</div>
+    </div>
     <p id="prompt" class="prompt">Tilt to target</p>
     <button id="capture-btn" class="capture-btn" aria-label="Take photo"></button>
     <button id="export-btn" class="btn hidden">Download all 40 photos (.zip)</button>

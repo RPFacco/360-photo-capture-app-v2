@@ -192,3 +192,50 @@ html, body {
   0% { opacity: 0.85; }
   100% { opacity: 0; }
 }
+/* Coverage dome: mirrors .tilt on the opposite edge. The canvas backing store is
+   sized in JS from devicePixelRatio; these are the CSS pixels it maps onto. */
+.dome {
+  position: absolute;
+  top: 50%;
+  left: 18px;
+  transform: translateY(-50%);
+  width: 112px;
+  height: 112px;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.6));
+  pointer-events: none;
+}
+
+/* The rotation gauge is the tilt bubble turned on its side: same track, same
+   bubble, same aligned state, same 220px travel so half === 97 holds for both. */
+.spin {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.spin-track {
+  position: relative;
+  width: 220px;
+  height: 10px;
+  background: var(--track);
+  border-radius: 999px;
+}
+.spin-center {
+  position: absolute;
+  left: 50%; top: -7px; bottom: -7px;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.5);
+  transform: translateX(-50%);
+}
+.spin-bubble {
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 3px solid #fff;
+  transform: translate(-50%, -50%);
+  will-change: transform;
+}
+.spin.aligned .spin-bubble { background: var(--ok); }
+.spin.aligned .angle { background: rgba(52, 209, 122, 0.22); }
