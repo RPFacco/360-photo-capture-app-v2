@@ -1,13 +1,13 @@
 # Guided 360 Capture
 
-A single-page web app that walks you through shooting a 40-photo turntable set with a
-phone: **5 tilt levels** (+60°, +30°, 0°, -30°, -60°) × **8 shots each**, rotating ~45°
+A single-page web app that walks you through shooting a 60-photo turntable set with a
+phone: **5 tilt levels** (+60°, +30°, 0°, -30°, -60°) × **12 shots each**, rotating ~30°
 between shots. An on-screen bubble level uses the gyroscope to tell you when the phone
 is at the right pitch. At the end it packs every shot into a single `.zip`.
 
 All photos come out **3:4 portrait**.
 
-three static files plus JSZip from a CDN.
+three static files.
 
 ## Running it
 
@@ -46,10 +46,9 @@ back to the canvas path for the rest of the run rather than producing a mixed se
 
 ## Memory
 
-The 40 blobs are held in memory until you hit export, and the ZIP is built as one more
-blob on top of that — roughly 60 MB at the current still size. It is stored, not
-deflated (`compression: "STORE"`), because compressing 40 JPEGs in one pass was enough
-on its own to push mobile Safari over its limit. If the export dies, lower
+Each photo is saved to IndexedDB as it is taken instead of being held in memory until
+export. The ZIP is stored, not deflated, because compressing 40 JPEGs in one pass was
+enough on its own to push mobile Safari over its limit. If the export dies, lower
 `STILL_SETTINGS` in `app.js`.
 
 ## Files
